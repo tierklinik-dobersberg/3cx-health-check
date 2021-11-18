@@ -9,6 +9,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/axios": "^0.14.0",
     "@types/node": "^16.11.7",
     "typescript": "^4.5.2"
   },

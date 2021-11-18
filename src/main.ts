@@ -1,5 +1,5 @@
 import { createClient, ConsoleClient, IHttpClient, DashboardClient } from '@3cx/api';
-import { Axios } from 'axios';
+import * as axios from 'axios';
 
 interface Config {
     HealthCheckServer: string;
@@ -105,11 +105,16 @@ async function checkStatus(http: IHttpClient, cfg: Config) {
 
 async function reportFailure(cfg: Config, error: any) {
     console.log(`[FAIL] Reporting 3CX failure`)
-    console.log(JSON.stringify(error, undefined, '    '))
+    if (typeof error === 'object' && 'toString' in error) {
+        error = error.toString()
+    }
+
+    await axios.default.post(`${cfg.HealthCheckServer}/ping/${cfg.HealthCheckUID}/fail`, error)
 }
 
 async function reportSuccess(cfg: Config) {
     console.log(`[ OK ] 3CX PBX is healthy, reporting ...`)
+    await axios.default.get(`${cfg.HealthCheckServer}/ping/${cfg.HealthCheckUID}`)
 }
 
 async function sleep(timeout: number): Promise<void> {
