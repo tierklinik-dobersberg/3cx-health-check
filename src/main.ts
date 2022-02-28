@@ -1,5 +1,98 @@
-import { createClient, ConsoleClient, IHttpClient, DashboardClient } from '@3cx/api';
+import { createClient, ConsoleClient, IHttpClient, DashboardClient, ISystemStatus } from '@3cx/api';
 import * as axios from 'axios';
+import serverFactory from 'express';
+import { register, Counter, Gauge, Summary } from 'prom-client';
+
+const activeCallsCounter = new Counter<string>({
+    name: 'pbx_active_calls_counter',
+    help: 'help'
+})
+const activeCallsGauge = new Gauge<string>({
+    name: 'pbx_active_calls',
+    help: 'help'
+})
+const cpuUsage = new Gauge<string>({
+    name: 'pbx_cpu_usage',
+    help: 'help',
+})
+const diskUsage = new Gauge<string>({
+    name: 'pbx_disk_usage',
+    help: 'help'
+})
+const extensionsTotal = new Gauge<string>({
+    name: 'pbx_extensions_total',
+    help: 'help'
+})
+const extensionsRegistered = new Gauge<string>({
+    name: 'pbx_extensions_registered',
+    help: 'help'
+})
+const freeDiskSpace = new Gauge<string>({
+    name: 'pbx_disk_free',
+    help: 'help'
+})
+const freeVirtualMemory = new Gauge<string>({
+    name: 'pbx_memory_virtual_free',
+    help: 'help'
+})
+const freePhysicalMemory = new Gauge<string>({
+    name: 'pbx_memory_physical_free',
+    help: 'help'
+})
+const usedVirtualMemory = new Gauge<string>({
+    name: 'pbx_memory_virtual_used',
+    help: 'help'
+})
+const usedPhysicalMemory = new Gauge<string>({
+    name: 'pbx_memory_physical_used',
+    help: 'help',
+})
+const totalDiskSpace = new Gauge<string>({
+    name: 'pbx_disk_total',
+    help: 'help'
+})
+const totalPhysicalMemory = new Gauge<string>({
+    name: 'pbx_memory_physical_total',
+    help: 'help',
+})
+const totalVirtualMemory = new Gauge<string>({
+    name: 'pbx_memory_virtual_total',
+    help: 'help',
+})
+const trunksRegistered = new Gauge<string>({
+    name: 'pbx_trunks_registered',
+    help: 'help'
+})
+const trunksTotal = new Gauge<string>({
+    name: 'pbx_trunks_total',
+    help: 'help'
+})
+const pollTime = new Summary<string>({
+    name: 'pbx_polls',
+    help: 'help',
+})
+
+function updateMetrics(stats: ISystemStatus) {
+    if (!stats) {
+        return;
+    }
+    cpuUsage.set(stats.CpuUsage)
+    activeCallsCounter.inc(stats.CallsActive)
+    activeCallsGauge.set(stats.CallsActive);
+    diskUsage.set(stats.DiskUsage);
+    extensionsTotal.set(stats.ExtensionsTotal)
+    extensionsRegistered.set(stats.ExtensionsRegistered)
+    freeDiskSpace.set(stats.FreeDiskSpace)
+    freeVirtualMemory.set((stats as any).FreeVirtualMemory)
+    freePhysicalMemory.set(stats.FreePhysicalMemory)
+    usedVirtualMemory.set(stats.MemoryUsage)
+    usedPhysicalMemory.set(stats.PhysicalMemoryUsage)
+    totalDiskSpace.set(stats.TotalDiskSpace)
+    totalPhysicalMemory.set(stats.TotalPhysicalMemory)
+    totalVirtualMemory.set(stats.TotalVirtualMemory)
+    trunksRegistered.set(stats.TrunksRegistered)
+    trunksTotal.set(stats.TrunksTotal)
+}
 
 interface Config {
     HealthCheckServer: string;
@@ -63,48 +156,24 @@ function loadConfig(): Config {
 async function checkStatus(http: IHttpClient, cfg: Config) {
     const dash = new DashboardClient(http);
 
-    const systemStatus = await dash.getSystemStatus();
-    console.log(systemStatus)
+    const pollTimer = pollTime.startTimer()
+    let systemStatus: ISystemStatus;
 
-    if (!systemStatus.Activated) {
-        throw "System is not activated"
+    try {
+        systemStatus = await dash.getSystemStatus();
+    } finally {
+        pollTimer()
     }
 
-    if (cfg.pbxMinExtensions !== undefined) {
-        if (systemStatus.ExtensionsRegistered < cfg.pbxMinExtensions) {
-            throw `Expected at least ${cfg.pbxMinExtensions} extensions to be registered. Found ${systemStatus.ExtensionsRegistered}`;
-        }
-    }
-
-    if (systemStatus.HasNotRunningServices) {
-        throw `System reports failed services`
-    }
-
-    if (systemStatus.HasUnregisteredSystemExtensions) {
-        throw `System reports unregistered system extension`
-    }
-
-    if(cfg.pbxMinTrunks !== undefined) {
-        if (systemStatus.TrunksRegistered < cfg.pbxMinTrunks) {
-            throw `Expected at least ${cfg.pbxMinTrunks} trunks to be registered. Found ${systemStatus.TrunksRegistered}`;
-        }
-    }
-
-    if(systemStatus.PhysicalMemoryUsage > 75) {
-        throw `Physical memory usage is at ${systemStatus.PhysicalMemoryUsage}`
-    }
-
-    if(systemStatus.CpuUsage > 75) {
-        throw `CPU usage is at ${systemStatus.CpuUsage}`
-    }
-
-    if(systemStatus.DiskUsage > 75) {
-        throw `Disk usage is at ${systemStatus.CpuUsage}`
+    try {
+        updateMetrics(systemStatus);
+    } catch(err) {
+        console.error("failed to update metrics", err)
     }
 }
 
 async function reportFailure(cfg: Config, error: any) {
-    console.log(`[FAIL] Reporting 3CX failure`)
+    console.log(`[FAIL] Reporting pbx failure`, error)
     if (typeof error === 'object' && 'toString' in error) {
         error = error.toString()
     }
@@ -113,7 +182,6 @@ async function reportFailure(cfg: Config, error: any) {
 }
 
 async function reportSuccess(cfg: Config) {
-    console.log(`[ OK ] 3CX PBX is healthy, reporting ...`)
     await axios.default.get(`${cfg.HealthCheckServer}/ping/${cfg.HealthCheckUID}`)
 }
 
@@ -122,11 +190,31 @@ async function sleep(timeout: number): Promise<void> {
 }
 
 async function main() {
-    console.log("[INFO] starting 3cx health check...")
+    console.log("[INFO] starting pbx health check...")
 
     const cfg = loadConfig()
+
+    const server = serverFactory()
+    server.get('/metrics', async (req, res) => {
+        try {
+            res.set('Content-Type', register.contentType);
+            res.end(await register.metrics());
+        } catch (ex) {
+            res.status(500).end(ex);
+        }
+    })
+
+    poll(cfg);
+
+    const port = process.env.PORT || 3000;
+    console.log(
+        `Server listening to ${port}, metrics exposed on /metrics endpoint`,
+    );
+    server.listen(port);
+}
+
+async function poll(cfg: Config) {
     const http = await createClient(cfg.pbxHost, {Username: cfg.pbxUser, Password: cfg.pbxPassword});
-    
     while(true) {
         await checkStatus(http, cfg)
             .then(() => reportSuccess(cfg))
